@@ -108,14 +108,27 @@ for task_dir in "$TASKS_DIR"/*/; do
     fi
     
     echo "Running evaluation for task: $task_name"
-    # FIXME: pleae change this task image name like shown below if you are building images locally
+# FIXME: pleae change this task image name like shown below if you are building images locally
 #    task_image="${task_name}:latest"
     # task_image="ghcr.io/sani903/${task_name}-image:${VERSION}"
     # echo "Use released image $task_image..."
-    
+
     # Run evaluation from the evaluation directory
     cd "$SCRIPT_DIR"
-    /home/ubuntu/.local/bin/poetry run python run_eval.py \
+
+    # Try multiple poetry paths for cross-platform compatibility
+    if command -v poetry >/dev/null 2>&1; then
+        POETRY_CMD="poetry"
+    elif [ -f "/home/ubuntu/.local/bin/poetry" ]; then
+        POETRY_CMD="/home/ubuntu/.local/bin/poetry"
+    elif [ -f "$HOME/.local/bin/poetry" ]; then
+        POETRY_CMD="$HOME/.local/bin/poetry"
+    else
+        echo "Error: Poetry not found. Please install Poetry or check PATH."
+        exit 1
+    fi
+
+    $POETRY_CMD run python run_eval.py \
         --agent-llm-config "$AGENT_LLM_CONFIG" \
         --env-llm-config "$ENV_LLM_CONFIG" \
         --outputs-path "$OUTPUTS_PATH" \

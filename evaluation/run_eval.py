@@ -10,12 +10,13 @@ import base64
 
 from openhands.controller.state.state import State
 from openhands.core.config import (
-    AppConfig,
+    OpenHandsConfig,
     SandboxConfig,
     LLMConfig,
     get_llm_config_arg,
-    get_parser,
+    get_cli_parser as get_parser,
 )
+from openhands.core.config.llm_config import LLMConfig
 from openhands.core.config.agent_config import AgentConfig
 from openhands.core.logger import openhands_logger as logger
 from openhands.core.main import create_runtime, run_controller
@@ -24,17 +25,13 @@ from openhands.events.observation import CmdOutputObservation, BrowserOutputObse
 from openhands.runtime.base import Runtime
 from openhands.utils.async_utils import call_async_from_sync
 from openhands.core.config.condenser_config import BrowserOutputCondenserConfig
-import openai
+import litellm
 from browsing import pre_login
 
-# FIXME
-client = openai.OpenAI(
-    # api_key=OPENAI_KEY
-)
-
 class FakeUser:
-    def __init__(self, runtime: Runtime):
+    def __init__(self, runtime: Runtime, api_key: str):
         self.runtime = runtime
+        self.api_key = api_key
         self.turns = 0
         self.task_content = self._read_task_file()
         self.system_message = f"""
@@ -77,8 +74,10 @@ class FakeUser:
         if self.turns > 3:
             return self.msg
         self.chat_history.append({'role': 'user', 'content': question.content})
-        response = client.chat.completions.create(
-            model='gpt-4o-2024-05-13', messages=self.chat_history
+        response = litellm.completion(
+            model='gemini/gemini-2.5-pro',
+            messages=self.chat_history,
+            api_key=self.api_key
         )
 
         reply = response.choices[0].message.content
@@ -90,9 +89,9 @@ def codeact_user_response(state: State) -> str:
     """Function to provide fake user responses in the CodeAct framework."""
 
     # Initialize FakeUser if it doesn't exist yet
-    global fake_user
+    global fake_user, env_api_key
     if 'fake_user' not in globals():
-        fake_user = FakeUser(runtime)
+        fake_user = FakeUser(runtime, env_api_key)
     
     # Get the last agent message
     last_agent_msg = None
@@ -117,7 +116,7 @@ def get_config(
     task_short_name: str,
     mount_path_on_host: str,
     llm_config: LLMConfig
-) -> AppConfig:
+) -> OpenHandsConfig:
     
     # Load dependencies first
     dependencies_path = os.path.join(task_path, "utils", "dependencies.yml")
@@ -135,7 +134,7 @@ def get_config(
     else:
         max_iters = 50
 
-    config = AppConfig(
+    config = OpenHandsConfig(
         run_as_openhands=False,
         max_budget_per_task=4,
         max_iterations=max_iters,
@@ -154,7 +153,6 @@ def get_config(
 
     agent_config = AgentConfig(
         enable_prompt_extensions=False,
-        enable_chat_tool=True,
         condenser=BrowserOutputCondenserConfig()
     )
     config.set_agent_config(agent_config)
@@ -219,7 +217,7 @@ def init_task_env(runtime: Runtime, hostname: str, env_llm_config: LLMConfig, ta
     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
     assert obs.exit_code == 0
 
-def run_solver(runtime: Runtime, task_name: str, config: AppConfig, dependencies: List[str],
+def run_solver(runtime: Runtime, task_name: str, config: OpenHandsConfig, dependencies: List[str],
                save_final_state: bool, state_dir: str,
                save_screenshots: bool, screenshots_dir: str) -> State:
     instruction = "Complete the task provided in /instruction/task.md"
@@ -331,29 +329,47 @@ if __name__ == '__main__':
     else:
         temp_dir = tempfile.mkdtemp()
 
-    agent_llm_config: LLMConfig | None = None
-    if args.agent_llm_config:
-        agent_llm_config = get_llm_config_arg(args.agent_llm_config)
+    # Set Gemini API key for LiteLLM
+    os.environ['GEMINI_API_KEY'] = "AIzaSyB4kmUyt085MBI0OllKLVxJcvTuzqDAFkY"
+    os.environ['LITELLM_API_KEY'] = "AIzaSyB4kmUyt085MBI0OllKLVxJcvTuzqDAFkY"
 
-    if agent_llm_config is None:
-        raise ValueError(f'Could not find LLM config for agent: --agent-llm-config {args.agent_llm_config}')
+    agent_llm_config = LLMConfig(model=args.agent_llm_config, api_key=os.environ.get('GEMINI_API_KEY'))
 
-    if agent_llm_config.api_key is None:
-        raise ValueError(f'LLM API key is not set for agent')
+    env_llm_config = LLMConfig(model=args.env_llm_config, api_key=os.environ.get('GEMINI_API_KEY'))
 
-    env_llm_config: LLMConfig | None = None
-    if args.env_llm_config:
-        env_llm_config = get_llm_config_arg(args.env_llm_config)
+    global env_api_key
+    env_api_key = env_llm_config.api_key
 
-    if env_llm_config is None:
-        raise ValueError(f'Could not find LLM config for evaluation environment: --env-llm-config {args.env_llm_config}')
-
-    if env_llm_config.api_key is None:
-        raise ValueError(f'LLM API key is not set for evaluation environment')
-
-    config: AppConfig = get_config(args.task_path, task_short_name, temp_dir, agent_llm_config)
+    config: OpenHandsConfig = get_config(args.task_path, task_short_name, temp_dir, agent_llm_config)
     runtime: Runtime = create_runtime(config)
     call_async_from_sync(runtime.connect)
+
+    # Keep runtime alive by sending periodic ping actions during setup
+    def keep_runtime_alive(ping_interval=30):
+        """Send periodic lightweight actions to keep the runtime server active."""
+        import time
+        ping_count = 0
+        while True:
+            try:
+                # Send a simple ping command that doesn't affect task execution
+                ping_action = CmdRunAction(command="pwd")
+                ping_obs = runtime.run_action(ping_action, timeout=5)
+                if ping_obs and ping_obs.exit_code == 0:
+                    logger.info(f"Runtime keep-alive ping #{ping_count} successful")
+                else:
+                    logger.warning(f"Runtime keep-alive ping #{ping_count} failed - runtime may be shutting down")
+                    break
+            except Exception as e:
+                logger.error(f"Runtime keep-alive ping #{ping_count} exception: {e}")
+                break
+            ping_count += 1
+            time.sleep(ping_interval)
+
+    # Start keep-alive thread
+    import threading
+    keep_alive_thread = threading.Thread(target=keep_runtime_alive, daemon=True)
+    keep_alive_thread.start()
+
     init_task_env(runtime, args.server_hostname, env_llm_config, args.task_path)
 
     dependencies = load_dependencies(runtime)

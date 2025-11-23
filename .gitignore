@@ -6,6 +6,30 @@ evaluation/config.toml
 *owncloud_data*
 *owncloud_apps*
 
+# Secrets and API Keys
+*.key
+*api_key*
+*API_KEY*
+*secret*
+*credentials*
+.config.toml
+.env*
+.envrc
+
+# Docker Images, Containers, and Build Data
+plane/
+servers/
+owasp_env/
+*.tar.gz
+*.img
+*.qcow2
+target/
+Cargo.lock
+
+# GitHub subdirectories and CI/CD
+.github/
+.gh/
+
 # Server-related
 servers/api-server/data/
 
